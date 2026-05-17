@@ -67,7 +67,7 @@ if event == "delayed":
         time.sleep(0.3)
 
     # Phone push
-    topic = os.environ.get("NTFY_TOPIC", "cc-2b5a6c24de06d58f9b459d30")
+    topic = os.environ.get("NTFY_TOPIC", "")
     if topic and ntfy_headers:
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
@@ -90,7 +90,7 @@ for key in ("last_assistant_message", "message"):
     if key in data:
         log(f"  {key}={str(data[key])[:120]}")
 
-topic = os.environ.get("NTFY_TOPIC", "cc-2b5a6c24de06d58f9b459d30")
+topic = os.environ.get("NTFY_TOPIC", "")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -244,15 +244,53 @@ elif event in ("elicitation", "idle", "stop") and local_ip and token:
         f"method=POST, headers.Authorization=Bearer {token}"
     )
 
-# ── Schedule delayed notification (fires in 5s if user doesn't type) ─────────
+# ── Send or schedule depending on event urgency ───────────────────────────────
+# permission + elicitation: send immediately (need your answer NOW)
+# stop + idle: 5-second delay (suppress if you're already watching)
 
-unique_id = secrets.token_hex(8)
-with open(PENDING, "w") as f:
-    json.dump({"id": unique_id, "title": title, "body": body, "ntfy_headers": ntfy_headers}, f)
+def send_now(title, body, ntfy_headers):
+    mac_body = body.split("\n")[0][:200]
+    mac_env = os.environ.copy()
+    mac_env["_NOTIFY_TITLE"] = title
+    mac_env["_NOTIFY_BODY"]  = mac_body
+    result = subprocess.run(
+        ["osascript", "-e",
+         'display notification (system attribute "_NOTIFY_BODY") with title (system attribute "_NOTIFY_TITLE")'],
+        env=mac_env, capture_output=True
+    )
+    if result.returncode == 0:
+        log("mac notif fired")
+    else:
+        log(f"mac notif error: {result.stderr.decode().strip()}")
 
-subprocess.Popen(
-    [sys.executable, os.path.abspath(__file__), "delayed", unique_id],
-    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    start_new_session=True
-)
-log(f"event={event}: notification scheduled (fires in 5s if idle)")
+    for _ in range(3):
+        subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"])
+        time.sleep(0.3)
+
+    topic = os.environ.get("NTFY_TOPIC", "")
+    if topic and ntfy_headers:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode()[:4096],
+            headers=ntfy_headers,
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            log("phone notif fired")
+        except Exception as e:
+            log(f"phone notif error: {e}")
+
+if event in ("permission_prompt", "elicitation"):
+    log(f"event={event}: sending immediately")
+    send_now(title, body, ntfy_headers)
+else:
+    unique_id = secrets.token_hex(8)
+    with open(PENDING, "w") as f:
+        json.dump({"id": unique_id, "title": title, "body": body, "ntfy_headers": ntfy_headers}, f)
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "delayed", unique_id],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+    log(f"event={event}: notification scheduled (fires in 5s if idle)")
